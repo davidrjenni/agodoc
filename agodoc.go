@@ -63,7 +63,7 @@ func main() {
 		godoc(x.Imported().Path())
 	case *types.Const, *types.Func, *types.TypeName, *types.Var:
 		if !x.Exported() {
-			fmt.Fprintf(os.Stderr, "can only print documentation of exported identifiers\n")
+			fmt.Fprintf(os.Stderr, "cannot print documentation of unexported identifier\n")
 			os.Exit(1)
 		}
 		godoc(obj.Pkg().Path(), obj.Name())
