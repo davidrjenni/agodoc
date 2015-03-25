@@ -12,11 +12,11 @@ import (
 	"bufio"
 	"fmt"
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -44,13 +44,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	prg, err := loadProgram(filename)
+	prg, err := loadProgram()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot load program: %v\n", err)
 		os.Exit(1)
 	}
 
-	obj, err := searchObject(prg, off)
+	obj, err := searchObject(filename, prg, off)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot find object: %v\n", err)
 		os.Exit(1)
@@ -58,14 +58,15 @@ func main() {
 
 	switch x := obj.(type) {
 	case *types.Builtin:
-		godoc(obj.Pkg().Path(), obj.Name())
+		godoc("builtin", obj.Name())
 	case *types.PkgName:
 		godoc(x.Imported().Path())
 	case *types.Const, *types.Func, *types.TypeName, *types.Var:
 		if !x.Exported() {
-			fmt.Fprintf(os.Stderr, "cannot print documentation of unexported identifier\n")
+			fmt.Fprintf(os.Stderr, "cannot print documentation of unexported identifier %s\n", obj.Name())
 			os.Exit(1)
 		}
+		fmt.Println(obj.Pkg().Name())
 		godoc(obj.Pkg().Path(), obj.Name())
 	default:
 		fmt.Fprintf(os.Stderr, "cannot print documentation of %v\n", obj)
@@ -131,32 +132,46 @@ func byteOffset(r io.RuneReader, off int) (bo int, err error) {
 	return
 }
 
-func loadProgram(filename string) (*loader.Program, error) {
+func loadProgram() (*loader.Program, error) {
 	var conf loader.Config
-	f, err := parser.ParseFile(token.NewFileSet(), filename, nil, parser.PackageClauseOnly)
+	files, err := filepath.Glob("*.go")
 	if err != nil {
 		return nil, err
 	}
-	if err = conf.CreateFromFilenames(f.Name.Name, filename); err != nil {
-		return nil, err
-	}
+	conf.CreateFromFilenames("", files...)
 	return conf.Load()
 }
 
-func searchObject(prg *loader.Program, off int) (types.Object, error) {
+func searchObject(filename string, prg *loader.Program, off int) (types.Object, error) {
+	filename = filepath.Base(filename)
 	info := prg.Created[0]
-	ident := identAtOffset(prg.Fset, info.Files[0], off)
+	var file *ast.File
+	found := false
+	for _, file = range info.Files {
+		f := prg.Fset.File(file.Pos())
+		if f.Name() == filename {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("file not found")
+	}
+	ident := identAtOffset(prg.Fset, file, off)
 	if ident == nil {
 		return nil, fmt.Errorf("no identifier here")
 	}
 	if obj := info.Uses[ident]; obj != nil {
 		return obj, nil
+
+	}
+	if obj := info.Defs[ident]; obj != nil {
+		return obj, nil
 	}
 	return nil, fmt.Errorf("cannot find identifier %s in file", ident.Name)
 }
 
-func identAtOffset(fset *token.FileSet, f *ast.File, off int) *ast.Ident {
-	var ident *ast.Ident
+func identAtOffset(fset *token.FileSet, f *ast.File, off int) (ident *ast.Ident) {
 	ast.Inspect(f, func(n ast.Node) bool {
 		if id, ok := n.(*ast.Ident); ok {
 			pos := fset.Position(id.Pos()).Offset
