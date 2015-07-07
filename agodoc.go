@@ -9,11 +9,14 @@ It shows the documentation of the identifier under the cursor.
 package main
 
 import (
-	"bufio"
+	"bytes"
+	"errors"
 	"fmt"
 	"go/ast"
+	"go/build"
 	"go/token"
 	"io"
+	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,40 +40,37 @@ func main() {
 		fmt.Fprintf(os.Stderr, "cannot open window: %v\n", err)
 		os.Exit(1)
 	}
-
-	filename, off, err := selection(win)
+	buf, err := ioutil.ReadAll(&bodyReader{win})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot read content: %v\n", err)
+		os.Exit(1)
+	}
+	filename, off, err := selection(win, buf)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cannot get selection: %v\n", err)
 		os.Exit(1)
 	}
 
-	prg, err := loadProgram()
+	fileInfos, err := ioutil.ReadDir(".")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "cannot load program: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cannot read directory: %v\n", err)
 		os.Exit(1)
 	}
-
-	obj, err := searchObject(filename, prg, off)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "cannot find object: %v\n", err)
-		os.Exit(1)
-	}
-
-	switch x := obj.(type) {
-	case *types.Builtin:
-		godoc("builtin", obj.Name())
-	case *types.PkgName:
-		godoc(x.Imported().Path())
-	case *types.Const, *types.Func, *types.TypeName, *types.Var:
-		if !x.Exported() {
-			fmt.Fprintf(os.Stderr, "cannot print documentation of unexported identifier %s\n", obj.Name())
-			os.Exit(1)
+	var filenames []string
+	for _, f := range fileInfos {
+		if strings.HasSuffix(f.Name(), ".go") && f.Name() != filename {
+			filenames = append(filenames, f.Name())
 		}
-		fmt.Println(obj.Pkg().Name())
-		godoc(obj.Pkg().Path(), obj.Name())
-	default:
-		fmt.Fprintf(os.Stderr, "cannot print documentation of %v\n", obj)
+	}
+	path, ident, err := searchAtOff(off, string(buf), filenames...)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot find identifier: %v\n", err)
 		os.Exit(1)
+	}
+	if ident != "" {
+		godoc(path, ident)
+	} else {
+		godoc(path)
 	}
 }
 
@@ -82,16 +82,17 @@ func openWin() (*acme.Win, error) {
 	return acme.Open(id, nil)
 }
 
-func selection(win *acme.Win) (filename string, off int, err error) {
+func selection(win *acme.Win, buf []byte) (filename string, off int, err error) {
 	filename, err = readFilename(win)
 	if err != nil {
 		return "", 0, err
 	}
+	filename = filepath.Base(filename)
 	q0, _, err := readAddr(win)
 	if err != nil {
 		return "", 0, err
 	}
-	off, err = byteOffset(bufio.NewReader(&bodyReader{win}), q0)
+	off, err = byteOffset(bytes.NewReader(buf), q0)
 	if err != nil {
 		return "", 0, err
 	}
@@ -132,58 +133,141 @@ func byteOffset(r io.RuneReader, off int) (bo int, err error) {
 	return
 }
 
-func loadProgram() (*loader.Program, error) {
+// searchAtOff returns the path and the identifier name at the given offset.
+func searchAtOff(off int, src string, filenames ...string) (string, string, error) {
 	var conf loader.Config
-	files, err := filepath.Glob("*.go")
+	var files []*ast.File
+
+	for _, name := range filenames {
+		f, err := parseFile(&conf, name, nil)
+		if err != nil {
+			return "", "", err
+		}
+		files = append(files, f)
+	}
+	f, err := parseFile(&conf, "", src)
+	if err != nil {
+		return "", "", err
+	}
+	files = append(files, f)
+
+	for _, imp := range f.Imports {
+		if isAtOff(conf.Fset, off, imp) {
+			return strings.Trim(imp.Path.Value, "\""), "", nil
+		}
+	}
+
+	ident := identAtOffset(conf.Fset, f, off)
+	if ident == nil {
+		return "", "", errors.New("no identifier here")
+	}
+
+	conf.CreateFromFiles("", files...)
+	prg, err := conf.Load()
+	if err != nil {
+		return "", "", err
+	}
+	info := prg.Created[0]
+	if obj := info.Uses[ident]; obj != nil {
+		return fromObj(obj, conf.Fset, f, off)
+	}
+	if obj := info.Defs[ident]; obj != nil {
+		return fromObj(obj, conf.Fset, f, off)
+	}
+	return "", "", errors.New("could not find identifier")
+}
+
+func parseFile(conf *loader.Config, name string, src interface{}) (*ast.File, error) {
+	f, err := conf.ParseFile(name, src)
 	if err != nil {
 		return nil, err
 	}
-	conf.CreateFromFilenames("", files...)
-	return conf.Load()
+	if strings.HasSuffix(f.Name.Name, "_test") {
+		f.Name.Name = f.Name.Name[:len(f.Name.Name)-len("_test")]
+	}
+	return f, nil
 }
 
-func searchObject(filename string, prg *loader.Program, off int) (types.Object, error) {
-	filename = filepath.Base(filename)
-	info := prg.Created[0]
-	var file *ast.File
-	found := false
-	for _, file = range info.Files {
-		f := prg.Fset.File(file.Pos())
-		if f.Name() == filename {
-			found = true
-			break
+// currImportDir returns the current import directory.
+func currImportDir() (string, error) {
+	path, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	pkg, err := build.ImportDir(path, build.ImportComment)
+	if err != nil {
+		return "", err
+	}
+	return pkg.ImportPath, nil
+}
+
+// fromObj returns the path and the identifier name of an object.
+func fromObj(obj types.Object, fset *token.FileSet, f *ast.File, off int) (string, string, error) {
+	switch o := obj.(type) {
+	case *types.Builtin:
+		return "builtin", o.Name(), nil
+	case *types.PkgName:
+		return o.Imported().Path(), "", nil
+	case *types.Const, *types.Func, *types.Nil, *types.TypeName, *types.Var:
+		if obj.Pkg() == nil {
+			return "builtin", obj.Name(), nil
 		}
+		if !isImported(fset, f, off) {
+			impDir, err := currImportDir()
+			return impDir, obj.Name(), err
+		}
+		return obj.Pkg().Path(), obj.Name(), nil
+	default:
+		return "", "", fmt.Errorf("cannot print documentation of %v\n", obj)
 	}
-	if !found {
-		return nil, fmt.Errorf("file not found")
-	}
-	ident := identAtOffset(prg.Fset, file, off)
-	if ident == nil {
-		return nil, fmt.Errorf("no identifier here")
-	}
-	if obj := info.Uses[ident]; obj != nil {
-		return obj, nil
-
-	}
-	if obj := info.Defs[ident]; obj != nil {
-		return obj, nil
-	}
-	return nil, fmt.Errorf("cannot find identifier %s in file", ident.Name)
 }
 
-func identAtOffset(fset *token.FileSet, f *ast.File, off int) (ident *ast.Ident) {
-	ast.Inspect(f, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok {
-			pos := fset.Position(id.Pos()).Offset
-			if pos <= off && off < pos+len(id.Name) {
-				ident = id
+// isImported returns true whether the identifier at the given offset is imported or not.
+func isImported(fset *token.FileSet, f *ast.File, off int) (isImp bool) {
+	ast.Inspect(f, func(node ast.Node) bool {
+		switch s := node.(type) {
+		case *ast.SelectorExpr:
+			if isAtOff(fset, off, s.Sel) {
+				if ident, ok := s.X.(*ast.Ident); ok {
+					for _, imp := range f.Imports {
+						if imp.Name != nil && imp.Name.Name == ident.Name {
+							isImp = true
+							return false
+						}
+						if strings.Trim(imp.Path.Value, "\"") == ident.Name {
+							isImp = true
+						}
+					}
+				}
+				return false
 			}
 		}
-		return ident == nil
+		return true
+	})
+	return isImp
+}
+
+// identAtOffset returns the identifier at an offset in a file.
+func identAtOffset(fset *token.FileSet, f *ast.File, off int) (ident *ast.Ident) {
+	ast.Inspect(f, func(node ast.Node) bool {
+		switch n := node.(type) {
+		case *ast.Ident:
+			if isAtOff(fset, off, node) {
+				ident = n
+				return false
+			}
+		}
+		return true
 	})
 	return ident
 }
 
+// isAtOff reports whether a node is at a given offset in a file set.
+func isAtOff(fset *token.FileSet, off int, n ast.Node) bool {
+	return fset.Position(n.Pos()).Offset <= off && off <= fset.Position(n.End()).Offset
+}
+
+// godoc runs the godoc command with the given arguments.
 func godoc(args ...string) {
 	c := exec.Command("godoc", args...)
 	c.Stderr, c.Stdout = os.Stderr, os.Stderr
