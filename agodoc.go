@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/build"
+	"go/parser"
 	"go/token"
 	"io"
 	"io/ioutil"
@@ -163,6 +164,7 @@ func searchAtOff(off int, src string, filenames ...string) (string, string, erro
 	}
 
 	conf.CreateFromFiles("", files...)
+	allowErrors(&conf)
 	prg, err := conf.Load()
 	if err != nil {
 		return "", "", err
@@ -175,6 +177,15 @@ func searchAtOff(off int, src string, filenames ...string) (string, string, erro
 		return fromObj(obj, conf.Fset, f, off)
 	}
 	return "", "", errors.New("could not find identifier")
+}
+
+func allowErrors(conf *loader.Config) {
+	ctxt := build.Default
+	ctxt.CgoEnabled = false
+	conf.Build = &ctxt
+	conf.AllowErrors = true
+	conf.ParserMode = parser.AllErrors
+	conf.TypeChecker.Error = func(err error) {}
 }
 
 func parseFile(conf *loader.Config, name string, src interface{}) (*ast.File, error) {
