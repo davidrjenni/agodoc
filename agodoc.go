@@ -245,7 +245,8 @@ func isImported(fset *token.FileSet, f *ast.File, off int) (isImp bool) {
 							isImp = true
 							return false
 						}
-						if strings.Trim(imp.Path.Value, "\"") == ident.Name {
+						parts := strings.Split(strings.Trim(imp.Path.Value, "\""), "/")
+						if parts[len(parts)-1] == ident.Name {
 							isImp = true
 						}
 					}

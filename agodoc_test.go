@@ -101,6 +101,7 @@ var searchTests = []struct {
 	{`package p; import "io"; type Reader struct{}; func main() { var _ io.Reader }`, 69, "io", "Reader"},
 	{`package p; import "fmt"; func main() { fmt.Println("Hello World!") }`, 43, "fmt", "Println"},
 	{`package p; import "math"; func main() { var _ int = math.MaxInt8 }`, 57, "math", "MaxInt8"},
+	{`package p; import "net/http"; func main() { var _ int = http.StatusOK }`, 61, "net/http", "StatusOK"},
 	{`package p; import "os"; func main() { var _ *os.File = os.Stdout }`, 58, "os", "Stdout"},
 }
 
