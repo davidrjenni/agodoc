@@ -6,6 +6,7 @@ package main
 
 import (
 	"bytes"
+	"reflect"
 	"testing"
 )
 
@@ -36,7 +37,9 @@ func TestByteOffset(t *testing.T) {
 	}
 }
 
-const importDir = "github.com/davidrjenni/agodoc"
+type empty struct{}
+
+var importDir = reflect.TypeOf(empty{}).PkgPath()
 
 func TestCurrImportPath(t *testing.T) {
 	currDir, err := currImportDir()
