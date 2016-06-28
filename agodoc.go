@@ -16,6 +16,7 @@ import (
 	"go/build"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io"
 	"io/ioutil"
 	"os"
@@ -26,7 +27,6 @@ import (
 
 	"9fans.net/go/acme"
 	"golang.org/x/tools/go/loader"
-	"golang.org/x/tools/go/types"
 )
 
 type bodyReader struct{ *acme.Win }
